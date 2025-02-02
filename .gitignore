@@ -133,3 +133,17 @@ dmypy.json
 
 # Pycharm
 /.idea
+venv_311/pyvenv.cfg
+venv_311/Scripts/activate
+venv_311/Scripts/activate.bat
+venv_311/Scripts/Activate.ps1
+venv_311/Scripts/deactivate.bat
+venv_311/Scripts/f2py.exe
+venv_311/Scripts/mpyq.exe
+venv_311/Scripts/numpy-config.exe
+venv_311/Scripts/pip.exe
+venv_311/Scripts/pip3.11.exe
+venv_311/Scripts/pip3.exe
+venv_311/Scripts/portserver.py
+venv_311/Scripts/python.exe
+venv_311/Scripts/pythonw.exe
