@@ -1,11 +1,15 @@
 from bot import PathfindingProbe
 
+import asyncio
+import logging
+import aiohttp
+
 import argparse
 import sc2
 
 from sc2.main import run_game
 from sc2.data import Race, Difficulty
-from sc2.player import Bot, Computer
+from sc2.player import Bot
 
 
 
@@ -62,10 +66,10 @@ def run():
 
     bot = load_bot(args)
 
-    print("Starting local game without a computer opponent...")
+    print("Starting Challenge...")
     run_game(
         sc2.maps.get(args.Map),
-        [bot],  # Only your bot
+        [bot],  
         realtime=args.Realtime,
         sc2_version=args.Sc2Version,
     )
