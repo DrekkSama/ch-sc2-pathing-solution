@@ -62,12 +62,13 @@ def run():
 
     bot = load_bot(args)
 
-    # Local game
-    print("Starting local game...")
-    run_game(sc2.maps.get(args.Map),
-                    [bot, Computer(Race[args.ComputerRace], Difficulty[args.ComputerDifficulty])],
-                    realtime=args.Realtime,
-                    sc2_version=args.Sc2Version, )
+    print("Starting local game without a computer opponent...")
+    run_game(
+        sc2.maps.get(args.Map),
+        [bot],  # Only your bot
+        realtime=args.Realtime,
+        sc2_version=args.Sc2Version,
+    )
 
 
 # Start game
