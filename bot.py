@@ -2,6 +2,7 @@ from sc2.bot_ai import BotAI, Race
 from sc2.data import Result
 
 from sc2.units import Units
+from sc2.unit import Unit
 from sc2.ids.unit_typeid import UnitTypeId
 
 from sc2.position import Point2, Point3
@@ -24,6 +25,10 @@ class PathfindingProbe(BotAI):
         self.probe_tag = None
         self.path_length = 0
         self.direct_distance = 0
+        self.visited_positions = {}
+        self.unvisited_positions = []
+        self.last_scout_position: Point2 = None
+        self.scout_destination: Point2 = None
 
     async def on_start(self):
         self.map_data = MapData(self, loglevel="DEBUG", arcade=True)
@@ -32,6 +37,13 @@ class PathfindingProbe(BotAI):
             self.probe_tag = self.workers.first.tag  # Get the first worker (probe)
             self.p0 = self.workers.first.position  # Starting position of the probe
             
+        pathing_grid = self.game_info.pathing_grid
+        for x in range(pathing_grid.width):
+            for y in range(pathing_grid.height):
+                coords = (x, y)
+                point = Point2(coords)
+                if pathing_grid[point] > 0:
+                    self.unvisited_positions.append(point)
         # TODO: Implement pathfinding logic after here
 
     async def on_step(self, iteration: int):
@@ -43,11 +55,35 @@ class PathfindingProbe(BotAI):
         self._draw_point_list(self.path, color=RED)
         self._draw_path_box(probe.position, color=GREEN)
 
-        # TODO: Implement movement logic after here
+        if self.last_scout_position and self.last_scout_position.distance_to(probe) < 0.0001:
+            self.unvisited_positions.remove(self.scout_destination)
 
-    
-    
-    
+        self.scout_destination = self.get_next_position(probe)
+        # TODO: Implement movement logic after here
+        if self.scout_destination:
+            probe.move(self.scout_destination)
+
+        self.last_scout_position = probe.position
+
+    def get_next_position(self,unit: Unit) -> Point2:
+        # remove_current_position_from_unvisited
+        try:
+            self.unvisited_positions.remove(unit.position.rounded)
+        except ValueError:
+            pass
+
+        # find nearest unvisited
+        closest_point: Point2 = None
+        closest_distance: int = 9999
+
+        for unvisited in self.unvisited_positions:
+            distance = unit.position.distance_to(unvisited)
+            if distance < closest_distance:
+                closest_point = unvisited
+                closest_distance = distance
+            if distance == 1:
+                break
+        return closest_point
     def _draw_path_box(self, p, color):
         """ Draws a debug box at a given position to visualize the path. """
         h = self.get_terrain_z_height(p)
