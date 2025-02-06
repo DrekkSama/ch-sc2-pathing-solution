@@ -58,7 +58,11 @@ class PathfindingProbe(BotAI):
         self.client.debug_box_out(p0, p1, color=color)
 
     def _draw_point_list(self, points, color):
-        for point in points:
+        if len(points) > 50:
+            points_to_draw = points[-50:]
+        else:
+            points_to_draw = points
+        for point in points_to_draw:
             self._draw_path_box(point, color)
 
     async def on_end(self, game_result: Result):
