@@ -5,6 +5,8 @@ from sc2.units import Units
 from sc2.unit import Unit
 from sc2.ids.unit_typeid import UnitTypeId
 
+import numpy as np
+
 from sc2.position import Point2, Point3
 from map_analyzer import MapData
 
@@ -33,16 +35,19 @@ class PathfindingProbe(BotAI):
     async def on_start(self):
         self.map_data = MapData(self, loglevel="DEBUG", arcade=True)
 
+        grid: np.ndarray = self.map_data.get_pyastar_grid()
+        print(f"grid length: {len(grid)}")
+
         if self.map_data:
             self.probe_tag = self.workers.first.tag  # Get the first worker (probe)
             self.p0 = self.workers.first.position  # Starting position of the probe
             
-        pathing_grid = self.game_info.pathing_grid
-        for x in range(pathing_grid.width):
-            for y in range(pathing_grid.height):
+        # pathing_grid = self.game_info.pathing_grid
+        for x in range(grid.shape[0]):
+            for y in range(grid.shape[1]):
                 coords = (x, y)
                 point = Point2(coords)
-                if pathing_grid[point] > 0:
+                if grid[point] != np.inf:
                     self.unvisited_positions.append(point)
         # TODO: Implement pathfinding logic after here
 
@@ -55,7 +60,7 @@ class PathfindingProbe(BotAI):
         self._draw_point_list(self.path, color=RED)
         self._draw_path_box(probe.position, color=GREEN)
 
-        if self.last_scout_position and self.last_scout_position.distance_to(probe) < 0.0001:
+        if self.last_scout_position and self.last_scout_position.distance_to(probe) < 0.001:
             self.unvisited_positions.remove(self.scout_destination)
 
         self.scout_destination = self.get_next_position(probe)
