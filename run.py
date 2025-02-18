@@ -30,7 +30,7 @@ def parse_arguments():
                         help="Computer race. One of [Terran, Zerg, Protoss, Random]. Default is Terran. Only for local play.")
     parser.add_argument("--ComputerDifficulty", type=str, default="VeryEasy",
                         help=f"Computer difficulty. One of [VeryEasy, Easy, Medium, MediumHard, Hard, Harder, VeryHard, CheatVision, CheatMoney, CheatInsane]. Default is VeryEasy. Only for local play.")
-    parser.add_argument("--Map", type=str, default="LightShade_Pathing_0",
+    parser.add_argument("--Map", type=str, default="LightShade_Pathing_1",
                         help="Custom map to use: LightShade_Pathing_0. ")
 
     # Both Ladder and Local play arguments
