@@ -6,6 +6,7 @@ from sc2.unit import Unit
 from sc2.ids.unit_typeid import UnitTypeId
 
 import numpy as np
+import random
 
 from sc2.position import Point2, Point3
 from map_analyzer import MapData
@@ -13,6 +14,7 @@ from map_analyzer import MapData
 
 GREEN = Point3((0, 255, 0))
 RED = Point3((255, 0, 0))
+BLUE = Point3((0, 0, 255))
 
 
 class PathfindingProbe(BotAI):
@@ -31,17 +33,18 @@ class PathfindingProbe(BotAI):
         self.unvisited_positions = []
         self.last_scout_position: Point2 = None
         self.scout_destination: Point2 = None
-
+        self.secret_location: Point2 = None
+        self.influence_grid: np.ndarray = None
     async def on_start(self):
         self.map_data = MapData(self, loglevel="DEBUG", arcade=True)
 
         grid: np.ndarray = self.map_data.get_pyastar_grid()
         print(f"grid length: {len(grid)}")
-
+        # add influence of 1 to enemy units
+        
         if self.map_data:
             self.probe_tag = self.workers.first.tag  # Get the first worker (probe)
             self.p0 = self.workers.first.position  # Starting position of the probe
-            
         # pathing_grid = self.game_info.pathing_grid
         for x in range(grid.shape[0]):
             for y in range(grid.shape[1]):
@@ -49,9 +52,24 @@ class PathfindingProbe(BotAI):
                 point = Point2(coords)
                 if grid[point] != np.inf:
                     self.unvisited_positions.append(point)
-        # TODO: Implement pathfinding logic after here
+        
+        self.create_random_secret_location(grid)
 
     async def on_step(self, iteration: int):
+        # Add influence of 1 to enemy units
+        self.influence_grid: np.ndarray = self.map_data.get_pyastar_grid()
+        self.game_info.player_start_location = self.workers.first.position
+
+
+        if self.enemy_units:
+            for unit in self.enemy_units:
+                self.map_data.add_cost(position=unit.position, radius=unit.ground_range, grid=self.influence_grid, weight=9)
+            # TODO draw only if visible
+            self.map_data.draw_influence_in_game(grid=self.influence_grid, lower_threshold=10)
+
+
+        #Print influence grid weight when enemy units are visible
+        # if self.enemy_units:
         # check the probe and update the path
         probe = self.units.by_tag(self.probe_tag)
         if probe and probe.position not in self.path:
@@ -64,11 +82,14 @@ class PathfindingProbe(BotAI):
             self.unvisited_positions.remove(self.scout_destination)
 
         self.scout_destination = self.get_next_position(probe)
+
         # TODO: Implement movement logic after here
         if self.scout_destination:
             probe.move(self.scout_destination)
 
         self.last_scout_position = probe.position
+
+        
 
     def get_next_position(self,unit: Unit) -> Point2:
         # remove_current_position_from_unvisited
@@ -89,6 +110,26 @@ class PathfindingProbe(BotAI):
             if distance == 1:
                 break
         return closest_point
+
+    def create_random_secret_location(self, grid: np.ndarray):
+        grid_width = grid.shape[0]
+        grid_height = grid.shape[1]
+
+        random_x = random.randint(0, grid_width)
+        random_y = random.randint(0, grid_height)
+        coords = (random_x, random_y)
+        self.secret_location = Point2(coords)
+        while grid[self.secret_location] == np.inf:
+            random_x = random.randint(0, grid_width)
+            random_y = random.randint(0, grid_height)
+            coords = (random_x, random_y)
+            self.secret_location = Point2(coords)
+        # self.client.debug_create_unit([UnitTypeId.MOTHERSHIP, 1, self.game_info.map_center, 1])
+        print(f"random location {self.secret_location}")
+
+    def found_secret_location(self):
+        return self.is_visible(self.secret_location)
+
     def _draw_path_box(self, p, color):
         """ Draws a debug box at a given position to visualize the path. """
         h = self.get_terrain_z_height(p)
@@ -105,6 +146,8 @@ class PathfindingProbe(BotAI):
             points_to_draw = points
         for point in points_to_draw:
             self._draw_path_box(point, color)
+
+        self._draw_path_box(self.secret_location, BLUE)
 
     async def on_end(self, game_result: Result):
         self.p1 = self.workers.first.position
