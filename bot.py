@@ -33,19 +33,17 @@ class PathfindingProbe(BotAI):
         self.unvisited_positions = []
         self.last_scout_position: Point2 = None
         self.scout_destination: Point2 = None
-        self.secret_location: Point2 = None
         self.influence_grid: np.ndarray = None
     async def on_start(self):
         self.map_data = MapData(self, loglevel="DEBUG", arcade=True)
 
         grid: np.ndarray = self.map_data.get_pyastar_grid()
         print(f"grid length: {len(grid)}")
-        # add influence of 1 to enemy units
         
         if self.map_data:
             self.probe_tag = self.workers.first.tag  # Get the first worker (probe)
             self.p0 = self.workers.first.position  # Starting position of the probe
-        # pathing_grid = self.game_info.pathing_grid
+
         for x in range(grid.shape[0]):
             for y in range(grid.shape[1]):
                 coords = (x, y)
@@ -53,7 +51,6 @@ class PathfindingProbe(BotAI):
                 if grid[point] != np.inf:
                     self.unvisited_positions.append(point)
         
-        self.create_random_secret_location(grid)
 
     async def on_step(self, iteration: int):
         # Add influence of 1 to enemy units
@@ -61,11 +58,7 @@ class PathfindingProbe(BotAI):
         self.game_info.player_start_location = self.workers.first.position
 
 
-        if self.enemy_units:
-            for unit in self.enemy_units:
-                self.map_data.add_cost(position=unit.position, radius=unit.ground_range, grid=self.influence_grid, weight=9)
-            # TODO draw only if visible
-            self.map_data.draw_influence_in_game(grid=self.influence_grid, lower_threshold=10)
+        
 
 
         #Print influence grid weight when enemy units are visible
@@ -75,6 +68,13 @@ class PathfindingProbe(BotAI):
         if probe and probe.position not in self.path:
             self.path.append(probe.position)
 
+        if self.enemy_units:
+            for unit in self.enemy_units:
+                self.map_data.add_cost(position=unit.position, radius=unit.ground_range, grid=self.influence_grid, weight=9)
+                # Draw influence if the enemy unit is close the probe
+                if probe.position.distance_to(unit.position) <= 10:
+                    self.map_data.draw_influence_in_game(grid=self.influence_grid, lower_threshold=9)
+            
         self._draw_point_list(self.path, color=RED)
         self._draw_path_box(probe.position, color=GREEN)
 
@@ -97,12 +97,18 @@ class PathfindingProbe(BotAI):
             self.unvisited_positions.remove(unit.position.rounded)
         except ValueError:
             pass
+       
 
         # find nearest unvisited
         closest_point: Point2 = None
         closest_distance: int = 9999
 
         for unvisited in self.unvisited_positions:
+            # Checks if the influence is 10 (enemy unit)
+            # TODO increase the distance to check for influence
+            influence = self.influence_grid[unvisited.x][unvisited.y]
+            if influence == 10:
+                continue
             distance = unit.position.distance_to(unvisited)
             if distance < closest_distance:
                 closest_point = unvisited
@@ -111,24 +117,6 @@ class PathfindingProbe(BotAI):
                 break
         return closest_point
 
-    def create_random_secret_location(self, grid: np.ndarray):
-        grid_width = grid.shape[0]
-        grid_height = grid.shape[1]
-
-        random_x = random.randint(0, grid_width)
-        random_y = random.randint(0, grid_height)
-        coords = (random_x, random_y)
-        self.secret_location = Point2(coords)
-        while grid[self.secret_location] == np.inf:
-            random_x = random.randint(0, grid_width)
-            random_y = random.randint(0, grid_height)
-            coords = (random_x, random_y)
-            self.secret_location = Point2(coords)
-        # self.client.debug_create_unit([UnitTypeId.MOTHERSHIP, 1, self.game_info.map_center, 1])
-        print(f"random location {self.secret_location}")
-
-    def found_secret_location(self):
-        return self.is_visible(self.secret_location)
 
     def _draw_path_box(self, p, color):
         """ Draws a debug box at a given position to visualize the path. """
@@ -146,8 +134,6 @@ class PathfindingProbe(BotAI):
             points_to_draw = points
         for point in points_to_draw:
             self._draw_path_box(point, color)
-
-        self._draw_path_box(self.secret_location, BLUE)
 
     async def on_end(self, game_result: Result):
         self.p1 = self.workers.first.position
