@@ -70,7 +70,7 @@ class PathfindingProbe(BotAI):
 
         if self.enemy_units:
             for unit in self.enemy_units:
-                self.map_data.add_cost(position=unit.position, radius=unit.ground_range, grid=self.influence_grid, weight=9)
+                self.map_data.add_cost(position=unit.position, radius=unit.ground_range+1, grid=self.influence_grid, weight=9)
                 # Draw influence if the enemy unit is close the probe
                 if probe.position.distance_to(unit.position) <= 10:
                     self.map_data.draw_influence_in_game(grid=self.influence_grid, lower_threshold=9)
