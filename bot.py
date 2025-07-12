@@ -3,6 +3,12 @@ from sc2.data import Result
 
 from sc2.units import Units
 from sc2.unit import Unit
+
+import json
+import datetime
+import os
+import traceback
+from typing import Dict, List, Optional, Tuple, Any
 from sc2.ids.unit_typeid import UnitTypeId
 
 import numpy as np
@@ -11,6 +17,218 @@ import math
 
 from sc2.position import Point2, Point3
 from map_analyzer import MapData
+
+
+class FailureLogger:
+    """Handles structured logging of failures for adaptive learning"""
+    
+    def __init__(self, log_dir="logs"):
+        self.log_dir = log_dir
+        self.failure_log = []
+        self.session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_file = f"failure_log_{self.session_timestamp}.json"
+        self.ensure_log_dir()
+        
+        # Statistics for analysis
+        self.stats = {
+            "total_deaths": 0,
+            "total_pathfinding_failures": 0,
+            "high_risk_areas": [],
+            "common_failure_points": {}
+        }
+    
+    def ensure_log_dir(self):
+        """Create logs directory if it doesn't exist"""
+        try:
+            print(f"[LOG] Checking if log directory exists: {self.log_dir}")
+            if not os.path.exists(self.log_dir):
+                print(f"[LOG] Creating log directory: {self.log_dir}")
+                os.makedirs(self.log_dir)
+                print(f"[LOG] Log directory created: {os.path.exists(self.log_dir)}")
+            else:
+                print(f"[LOG] Log directory already exists")
+                
+            # Test if we can write to the directory
+            test_file_path = os.path.join(self.log_dir, 'test_write.txt')
+            with open(test_file_path, 'w') as f:
+                f.write('test')
+            print(f"[LOG] Successfully wrote test file to: {test_file_path}")
+            
+            # Clean up test file
+            os.remove(test_file_path)
+            print(f"[LOG] Test file removed")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to ensure log directory: {e}")
+            traceback.print_exc()
+            
+            # Try an alternative approach - use absolute path
+            try:
+                alternative_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                print(f"[LOG] Trying alternative log directory: {alternative_dir}")
+                if not os.path.exists(alternative_dir):
+                    os.makedirs(alternative_dir)
+                self.log_dir = alternative_dir
+                print(f"[LOG] Set log directory to: {self.log_dir}")
+            except Exception as e:
+                print(f"[ERROR] Failed alternative log directory: {e}")
+                traceback.print_exc()
+    
+    def log_probe_death(self, position: Point2, context: Dict[str, Any]):
+        """Log probe death with context"""
+        timestamp = datetime.datetime.now().isoformat()
+        
+        # Format position for JSON serialization
+        pos_dict = {"x": position.x, "y": position.y}
+        
+        # Process path history for JSON serialization
+        path_history = []
+        if "path_history" in context:
+            path_history = [{"x": p.x, "y": p.y} for p in context["path_history"]]
+            context.pop("path_history")
+        
+        # Process enemy units for JSON serialization
+        enemies = []
+        if "enemy_units" in context:
+            for unit in context["enemy_units"]:
+                enemies.append({
+                    "type": str(unit.type_id),
+                    "position": {"x": unit.position.x, "y": unit.position.y}
+                })
+            context.pop("enemy_units")
+        
+        # Create the log entry
+        log_entry = {
+            "type": "probe_death",
+            "timestamp": timestamp,
+            "position": pos_dict,
+            "path_history": path_history,
+            "enemy_units": enemies,
+            "context": context
+        }
+        
+        self.failure_log.append(log_entry)
+        self.stats["total_deaths"] += 1
+        
+        # Track common failure points
+        pos_key = f"{int(position.x)},{int(position.y)}"
+        if pos_key in self.stats["common_failure_points"]:
+            self.stats["common_failure_points"][pos_key] += 1
+        else:
+            self.stats["common_failure_points"][pos_key] = 1
+        
+        # Update high risk areas if death count exceeds threshold
+        if self.stats["common_failure_points"][pos_key] >= 2:
+            if pos_key not in [f"{int(p.x)},{int(p.y)}" for p in self.stats["high_risk_areas"]]:
+                self.stats["high_risk_areas"].append(position)
+        
+        # Save to file
+        self.save_to_file()
+        
+        return log_entry
+    
+    def log_pathfinding_failure(self, start: Point2, goal: Point2, context: Dict[str, Any]):
+        """Log pathfinding failure with context"""
+        timestamp = datetime.datetime.now().isoformat()
+        
+        # Format positions for JSON serialization
+        start_dict = {"x": start.x, "y": start.y}
+        goal_dict = {"x": goal.x, "y": goal.y}
+        
+        # Create the log entry
+        log_entry = {
+            "type": "pathfinding_failure",
+            "timestamp": timestamp,
+            "start": start_dict,
+            "goal": goal_dict,
+            "context": context
+        }
+        
+        self.failure_log.append(log_entry)
+        self.stats["total_pathfinding_failures"] += 1
+        
+        # Save to file
+        self.save_to_file()
+        
+        return log_entry
+    
+    def save_to_file(self):
+        """Save the current failure log to a JSON file"""
+        try:
+            # Ensure directory exists
+            self.ensure_log_dir()
+            
+            # Full path to log file
+            file_path = os.path.join(self.log_dir, self.session_file)
+            
+            # Save log and stats to JSON file
+            with open(file_path, 'w') as f:
+                # Convert Point2 objects to serializable dictionaries
+                stats_copy = self.stats.copy()
+                if "high_risk_areas" in stats_copy:
+                    stats_copy["high_risk_areas"] = [
+                        {"x": point.x, "y": point.y} for point in stats_copy["high_risk_areas"]
+                    ]
+                
+                json.dump({
+                    "failure_log": self.failure_log,
+                    "stats": stats_copy
+                }, f, indent=2)
+                
+            print(f"Saved failure log to {file_path}")
+                
+        except Exception as e:
+            print(f"Error saving failure log to file: {e}")
+            traceback.print_exc()
+    
+    def get_high_risk_areas(self):
+        """Return high risk areas for pathfinding avoidance with adaptive learning"""
+        # Get base high risk areas that have been tracked in stats
+        high_risk_areas = self.stats["high_risk_areas"].copy()
+        
+        # Analyze failure log to identify additional risk areas that might not be in the stats yet
+        failure_count_threshold = 1  # Lower threshold for adaptive learning
+        
+        # Build a position frequency map from recent failures (last 10 events)
+        position_frequencies = {}
+        recent_failures = self.failure_log[-10:] if len(self.failure_log) > 10 else self.failure_log
+        
+        for entry in recent_failures:
+            # For probe deaths, add the death position
+            if entry["type"] == "probe_death":
+                pos_key = f"{int(entry['position']['x'])},{int(entry['position']['y'])}"
+                position_frequencies[pos_key] = position_frequencies.get(pos_key, 0) + 1
+            
+            # For pathfinding failures, analyze recent path history
+            elif entry["type"] == "pathfinding_failure":
+                # Add the goal position as problematic
+                goal_key = f"{int(entry['goal']['x'])},{int(entry['goal']['y'])}"
+                position_frequencies[goal_key] = position_frequencies.get(goal_key, 0) + 1
+                
+                # Check if there's path history in the context
+                if "path_history" in entry.get("context", {}) and entry["context"]["path_history"]:
+                    # Add the last few points of the path history (likely where the probe got stuck)
+                    path_history = entry["context"]["path_history"]
+                    if isinstance(path_history, list) and path_history:
+                        for point in path_history[-3:]:  # Last 3 points
+                            if isinstance(point, dict) and "x" in point and "y" in point:
+                                pos_key = f"{int(point['x'])},{int(point['y'])}"
+                                position_frequencies[pos_key] = position_frequencies.get(pos_key, 0) + 0.5  # Lower weight
+        
+        # Add positions that exceed threshold to high risk areas
+        for pos_key, count in position_frequencies.items():
+            if count >= failure_count_threshold:
+                x, y = map(float, pos_key.split(','))
+                new_high_risk = Point2((x, y))
+                
+                # Check if this point is already in high_risk_areas
+                if not any(existing.distance_to(new_high_risk) < 3.0 for existing in high_risk_areas):
+                    high_risk_areas.append(new_high_risk)
+                    # Also add to persistent stats for future reference
+                    if new_high_risk not in self.stats["high_risk_areas"]:
+                        self.stats["high_risk_areas"].append(new_high_risk)
+        
+        return high_risk_areas
 
 
 GREEN = Point3((0, 255, 0))
@@ -37,9 +255,14 @@ class PathfindingProbe(BotAI):
         self.target = None
         
         # Risk management
-        self.death_log = []
+        self.death_log = []  # Keep for backward compatibility
         self.enemy_units = []
         self.risk_map = None
+        
+        # Failure logging system for adaptive learning
+        self.failure_logger = FailureLogger()
+        self.path_history = []  # Store recent path history for failure context
+        self.max_path_history = 20  # Maximum number of recent points to store
         
         # Initialize waypoints as empty, will be set in on_start with map-relative positions
         self.waypoints = []
@@ -132,10 +355,33 @@ class PathfindingProbe(BotAI):
         # Get the probe
         probe = self.units.by_tag(self.probe_tag) if self.probe_tag else None
         
+        # Track previous probe health to detect deaths
+        probe_died = False
+        if hasattr(self, 'previous_probe_health') and self.probe_tag and probe:
+            if self.previous_probe_health > 0 and probe.health <= 0:
+                probe_died = True
+                print(f"[DEATH] Probe health dropped from {self.previous_probe_health} to {probe.health}, marking as dead")
+        
+        # Save current probe health for next cycle
+        if probe:
+            self.previous_probe_health = probe.health
+        else:
+            self.previous_probe_health = 0
+        
         # Check if probe died and handle respawn
-        if self.probe_tag and not probe and self.workers:
+        if (self.probe_tag and not probe and self.workers) or probe_died:
             # Probe died, handle death and get new probe
+            print(f"[DEATH] Handling probe death at cycle {iteration}, game time {self.time:.1f}")
             self.handle_probe_death()
+            
+            # Force save logs immediately
+            try:
+                print("[LOG] Forcing log save after probe death")
+                self.failure_logger.save_to_file()
+            except Exception as e:
+                print(f"[ERROR] Failed to save logs: {str(e)}")
+                traceback.print_exc()
+                
             probe = self.workers.first
             if probe:
                 self.probe_tag = probe.tag
@@ -161,10 +407,15 @@ class PathfindingProbe(BotAI):
             print(f"[DEBUG] Current waypoint: {self.waypoints[self.current_waypoint_index]}")
             print(f"[DEBUG] Game state - Time: {self.time:.1f}, Supply: {self.supply_used}/{self.supply_cap}")
             
-        # Track path history for visualization
+        # Track path history for visualization and failure analysis
         if len(self.path) == 0 or probe.position.distance_to(self.path[-1]) > 1.0:
             self.path.append(probe.position)
-            if len(self.path) > 100:  # Limit path history length
+            # Add to path history for failure context (limited size)
+            self.path_history.append(probe.position)
+            if len(self.path_history) > self.max_path_history:
+                self.path_history.pop(0)
+            # Limit main path history length for visualization
+            if len(self.path) > 100:
                 self.path.pop(0)
 
         # Get current waypoint
@@ -175,14 +426,21 @@ class PathfindingProbe(BotAI):
         if not waypoint_reached:  # If not at waypoint
             # Always try pathfinding first
             try:
-                # Create a combined grid of influence and risk
-                combined_grid = self.influence_grid.copy().astype(np.float32)
+                # Create a proper combined grid of influence and risk
+                # Start with a clean grid (1 = walkable, higher values = more costly to traverse)
+                combined_grid = self.map_data.get_pyastar_grid().astype(np.float32)
                 
-                # Add risk to the grid (higher risk = less desirable path)
+                # Scale risk values appropriately (risk should increase cost but not make areas impassable)
+                # Only apply risk where it exceeds threshold
                 risk_threshold = 0.5
                 risk_mask = (self.risk_map > risk_threshold)
-                risk_values = np.minimum(10, 1 + (10 * self.risk_map[risk_mask]))
-                combined_grid[risk_mask] = risk_values
+                
+                # Add scaled risk to walkable areas (multiplier of 3 rather than 10 to avoid making areas impassable)
+                # Minimum risk cost is 1 (baseline) + scaled risk value
+                risk_addition = np.minimum(4.0, 1.0 + (3.0 * self.risk_map[risk_mask]))
+                
+                # Add risk to the existing grid values for risky areas
+                combined_grid[risk_mask] += risk_addition
                 
                 # Convert positions to Point2 if they aren't already
                 start_pos = Point2((probe.position.x, probe.position.y))
@@ -210,6 +468,24 @@ class PathfindingProbe(BotAI):
                         print(f"[PATH] Distance to waypoint: {probe.position.distance_to(current_waypoint):.2f}")
                 else:
                     print(f"[PATH] No path found to {current_waypoint}, falling back to direct movement")
+                    
+                    # Log pathfinding failure with context
+                    context = {
+                        "current_waypoint_index": self.current_waypoint_index,
+                        "start_position": {"x": start_pos.x, "y": start_pos.y},
+                        "goal_position": {"x": target_pos.x, "y": target_pos.y},
+                        "path_history": self.path_history.copy(),
+                        "enemy_units": [unit for unit in self.enemy_units if unit.distance_to(start_pos) < 15],
+                        "game_time": self.time,
+                        "loop": self.state.game_loop,
+                        "risk_threshold": risk_threshold,
+                        "max_risk_value": float(self.risk_map.max()) if self.risk_map.size > 0 else 0.0
+                    }
+                    
+                    # Log the failure with enhanced context
+                    self.failure_logger.log_pathfinding_failure(start_pos, target_pos, context)
+                    
+                    # Fall back to direct movement
                     probe.move(current_waypoint)
                     self.current_path = [probe.position, current_waypoint]  # Show direct path in debug
                     
@@ -260,37 +536,18 @@ class PathfindingProbe(BotAI):
                             height = self.get_terrain_height(Point2((point.x, point.y)))
                             path_points.append(Point3((point.x, point.y, height + 0.5)))
                     
-                    if len(path_points) > 1:
+                    if len(path_points) > 1 and hasattr(self.client, 'debug_polyline_out'):
                         self.client.debug_polyline_out(path_points, color=BLUE)
                 
             except Exception as e:
                 print(f"[DEBUG] Error in debug drawing: {str(e)[:100]}")
 
-    def handle_probe_death(self):
-        """Handle probe death by recording the death location"""
-        if self.path:
-            death_pos = self.path[-1]  # Last known position before death
-            self.death_log.append(death_pos)
-            print(f"Probe died at {death_pos}")
-        
-        # Reset for respawn
-        self.current_path = []
-        self.path = []
-        
-        # Try to get the probe again (it might have respawned)
-        probe = self.units.by_tag(self.probe_tag) if self.probe_tag else None
-        if not probe and self.units:
-            # If we have units but no probe with the stored tag, get the first worker
-            worker = self.workers.first
-            if worker:
-                self.probe_tag = worker.tag
-    
     def update_risk_map(self):
-        """Update the risk map based on enemy positions and death log"""
+        """Update the risk map based on enemy positions, death log, and failure statistics for adaptive learning"""
         if self.risk_map is None or self.risk_map.size == 0:
             return
             
-        # Decay existing risk
+        # Decay existing risk - simulates risk fading over time if no new deaths/failures occur there
         self.risk_map = self.risk_map * 0.95
         
         # Add risk around enemy units
@@ -330,6 +587,125 @@ class PathfindingProbe(BotAI):
                                 # Higher risk closer to death location
                                 risk = max(0, 20 - (distance * 2))  # Linear falloff
                                 self.risk_map[nx, ny] = max(self.risk_map[nx, ny], risk)
+        
+        # Add high-risk areas from failure logger for adaptive learning
+        high_risk_areas = self.failure_logger.get_high_risk_areas()
+        for area in high_risk_areas:
+            x, y = int(area.x), int(area.y)
+            if 0 <= x < self.risk_map.shape[0] and 0 <= y < self.risk_map.shape[1]:
+                # Very high risk at areas with repeated failures
+                self.risk_map[x, y] = max(self.risk_map[x, y], 40)  # Even higher than death locations
+                
+                # Add decreasing risk in larger radius around high risk areas
+                for dx in range(-12, 13):
+                    for dy in range(-12, 13):
+                        nx, ny = x + dx, y + dy
+                        if (0 <= nx < self.risk_map.shape[0] and 
+                            0 <= ny < self.risk_map.shape[1]):
+                            distance = (dx**2 + dy**2) ** 0.5
+                            if distance <= 12:  # Larger radius for adaptive learning areas
+                                # Higher risk closer to high-risk area
+                                risk = max(0, 25 - (distance * 2))  # Steeper falloff
+                                self.risk_map[nx, ny] = max(self.risk_map[nx, ny], risk)
+        
+        # Add risk around enemy units
+        for unit in self.enemy_units:
+            pos = unit.position.rounded
+            x, y = int(pos.x), int(pos.y)
+            if 0 <= x < self.risk_map.shape[0] and 0 <= y < self.risk_map.shape[1]:
+                # Higher risk closer to enemy units
+                self.risk_map[x, y] = max(self.risk_map[x, y], 10)
+                
+                # Add decreasing risk in radius
+                for dx in range(-5, 6):
+                    for dy in range(-5, 6):
+                        nx, ny = x + dx, y + dy
+                        if (0 <= nx < self.risk_map.shape[0] and 
+                            0 <= ny < self.risk_map.shape[1]):
+                            distance = (dx**2 + dy**2) ** 0.5
+                            if distance <= 5:  # Only affect nearby tiles
+                                risk = max(0, 10 - distance)  # Linear falloff
+                                self.risk_map[nx, ny] = max(self.risk_map[nx, ny], risk)
+        
+        # Add risk from death log (persistent high risk areas)
+        for death_pos in self.death_log:
+            x, y = int(death_pos.x), int(death_pos.y)
+            if 0 <= x < self.risk_map.shape[0] and 0 <= y < self.risk_map.shape[1]:
+                # Add high risk at death location with larger radius
+                self.risk_map[x, y] = max(self.risk_map[x, y], 30)  # Very high risk at death location
+                
+                # Add decreasing risk in larger radius around death location
+                for dx in range(-10, 11):
+                    for dy in range(-10, 11):
+                        nx, ny = x + dx, y + dy
+                        if (0 <= nx < self.risk_map.shape[0] and 
+                            0 <= ny < self.risk_map.shape[1]):
+                            distance = (dx**2 + dy**2) ** 0.5
+                            if distance <= 10:  # Larger radius for death areas
+                                # Higher risk closer to death location
+                                risk = max(0, 20 - (distance * 2))  # Linear falloff
+                                self.risk_map[nx, ny] = max(self.risk_map[nx, ny], risk)
+                                
+    def handle_probe_death(self):
+        """Handle probe death - log death, record position, reset path"""
+        death_pos = None
+        
+        # Record last known position
+        if self.path:
+            death_pos = self.path[-1]
+        elif self.probe_tag and hasattr(self, 'last_probe_position'):
+            death_pos = self.last_probe_position
+            
+        if not death_pos:
+            print("[DEATH] No position data for probe death")
+            return
+            
+        print(f"[DEATH] Probe died at {death_pos}")
+        
+        # Log death context
+        context = {
+            "current_waypoint": self.waypoints[self.current_waypoint_index],
+            "path_history": self.path_history,
+            "nearby_enemies": []
+        }
+        
+        # Record nearby enemy units
+        for enemy in self.enemy_units:
+            if enemy.position.distance_to(death_pos) < 15:
+                context["nearby_enemies"].append({
+                    "type": enemy.type_id.name,
+                    "position": {"x": enemy.position.x, "y": enemy.position.y},
+                    "distance": enemy.position.distance_to(death_pos)
+                })
+                
+        # Add game state information
+        context["game_time"] = self.time
+        context["game_loop"] = self.state.game_loop
+        context["visible"] = self.is_visible(death_pos)
+        
+        # Log to failure logger
+        self.failure_logger.log_probe_death(death_pos, context)
+        
+        # Reset path and path history
+        self.path = []
+        self.path_history = []
+        
+        # Force save logs immediately 
+        try:
+            print("[LOG] Forcing immediate log save after probe death")
+            self.failure_logger.save_to_file()
+        except Exception as e:
+            print(f"[ERROR] Failed to save logs after probe death: {e}")
+            traceback.print_exc()
+        self.path_history = []  # Clear path history too
+        
+        # Try to get the probe again (it might have respawned)
+        probe = self.units.by_tag(self.probe_tag) if self.probe_tag else None
+        if not probe and self.units:
+            # If we have units but no probe with the stored tag, get the first worker
+            worker = self.workers.first
+            if worker:
+                self.probe_tag = worker.tag
 
     def get_next_position(self,unit: Unit) -> Point2:
         try:
@@ -371,6 +747,17 @@ class PathfindingProbe(BotAI):
             self._draw_path_box(point, color)
 
     async def on_end(self, game_result: Result):
+        """Handle end of game - ensure logs are saved"""
+        print(f"[END] Game ended with result: {game_result}")
+        
+        # Make sure logs are saved at the end of the game
+        try:
+            print("[LOG] Saving logs at game end")
+            self.failure_logger.save_to_file()
+            print("[LOG] End-of-game log save complete")
+        except Exception as e:
+            print(f"[ERROR] Failed to save logs at game end: {e}")
+            traceback.print_exc()
         if self.workers:
             self.p1 = self.workers.first.position
             self.print_path_efficiency()
