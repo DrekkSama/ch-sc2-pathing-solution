@@ -40,39 +40,19 @@ class FailureLogger:
     def ensure_log_dir(self):
         """Create logs directory if it doesn't exist"""
         try:
-            print(f"[LOG] Checking if log directory exists: {self.log_dir}")
             if not os.path.exists(self.log_dir):
-                print(f"[LOG] Creating log directory: {self.log_dir}")
                 os.makedirs(self.log_dir)
-                print(f"[LOG] Log directory created: {os.path.exists(self.log_dir)}")
-            else:
-                print(f"[LOG] Log directory already exists")
-                
-            # Test if we can write to the directory
-            test_file_path = os.path.join(self.log_dir, 'test_write.txt')
-            with open(test_file_path, 'w') as f:
-                f.write('test')
-            print(f"[LOG] Successfully wrote test file to: {test_file_path}")
-            
-            # Clean up test file
-            os.remove(test_file_path)
-            print(f"[LOG] Test file removed")
-            
         except Exception as e:
             print(f"[ERROR] Failed to ensure log directory: {e}")
-            traceback.print_exc()
             
             # Try an alternative approach - use absolute path
             try:
                 alternative_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-                print(f"[LOG] Trying alternative log directory: {alternative_dir}")
                 if not os.path.exists(alternative_dir):
                     os.makedirs(alternative_dir)
                 self.log_dir = alternative_dir
-                print(f"[LOG] Set log directory to: {self.log_dir}")
             except Exception as e:
                 print(f"[ERROR] Failed alternative log directory: {e}")
-                traceback.print_exc()
     
     def log_probe_death(self, position: Point2, context: Dict[str, Any]):
         """Log probe death with context"""
@@ -352,24 +332,18 @@ class PathfindingProbe(BotAI):
         
 
     async def on_step(self, iteration: int):
-        # Get the probe
-        probe = self.units.by_tag(self.probe_tag) if self.probe_tag else None
+        # Safely get the probe - handle case when it might have died
+        probe = None
+        if self.probe_tag:
+            try:
+                probe = self.units.by_tag(self.probe_tag)
+            except KeyError:
+                # Probe with this tag no longer exists
+                print(f"[DEATH] Probe with tag {self.probe_tag} no longer exists")
+                self.probe_tag = None  # Clear the tag since it's invalid
         
-        # Track previous probe health to detect deaths
-        probe_died = False
-        if hasattr(self, 'previous_probe_health') and self.probe_tag and probe:
-            if self.previous_probe_health > 0 and probe.health <= 0:
-                probe_died = True
-                print(f"[DEATH] Probe health dropped from {self.previous_probe_health} to {probe.health}, marking as dead")
-        
-        # Save current probe health for next cycle
-        if probe:
-            self.previous_probe_health = probe.health
-        else:
-            self.previous_probe_health = 0
-        
-        # Check if probe died and handle respawn
-        if (self.probe_tag and not probe and self.workers) or probe_died:
+        # Check if we need to handle probe death or get a new probe
+        if self.probe_tag is None and self.workers:
             # Probe died, handle death and get new probe
             print(f"[DEATH] Handling probe death at cycle {iteration}, game time {self.time:.1f}")
             self.handle_probe_death()
@@ -422,7 +396,7 @@ class PathfindingProbe(BotAI):
         current_waypoint = self.waypoints[self.current_waypoint_index]
         
         # Simple movement towards waypoint
-        waypoint_reached = probe.position.distance_to(current_waypoint) < 0.5  # 0.5 is close enough to consider waypoint reached
+        waypoint_reached = probe.position.distance_to(current_waypoint) < 0.1  # 0.1 is close enough to consider waypoint reached
         if not waypoint_reached:  # If not at waypoint
             # Always try pathfinding first
             try:
@@ -647,29 +621,36 @@ class PathfindingProbe(BotAI):
                                 self.risk_map[nx, ny] = max(self.risk_map[nx, ny], risk)
                                 
     def handle_probe_death(self):
-        """Handle probe death - log death, record position, reset path"""
+        """Handle probe death - log death, record position, reset path for respawn"""
         death_pos = None
         
-        # Record last known position
+        # Get the death position from the last known path point
         if self.path:
             death_pos = self.path[-1]
-        elif self.probe_tag and hasattr(self, 'last_probe_position'):
+        elif hasattr(self, 'last_probe_position'):
             death_pos = self.last_probe_position
             
         if not death_pos:
-            print("[DEATH] No position data for probe death")
+            print("[DEATH] No position data available for probe death")
             return
             
-        print(f"[DEATH] Probe died at {death_pos}")
+        print(f"[DEATH] Probe died at {death_pos}, logging for adaptive learning")
         
-        # Log death context
+        # Clear the probe tag as it's now invalid
+        self.probe_tag = None
+        
+        # Prepare context data for the log
         context = {
             "current_waypoint": self.waypoints[self.current_waypoint_index],
             "path_history": self.path_history,
-            "nearby_enemies": []
+            "nearby_enemies": [],
+            "game_time": self.time,
+            "game_loop": self.state.game_loop,
+            "death_count": self.failure_logger.stats["total_deaths"] + 1,
+            "visible": self.is_visible(death_pos)
         }
         
-        # Record nearby enemy units
+        # Add nearby enemy units to context
         for enemy in self.enemy_units:
             if enemy.position.distance_to(death_pos) < 15:
                 context["nearby_enemies"].append({
@@ -677,27 +658,28 @@ class PathfindingProbe(BotAI):
                     "position": {"x": enemy.position.x, "y": enemy.position.y},
                     "distance": enemy.position.distance_to(death_pos)
                 })
-                
-        # Add game state information
-        context["game_time"] = self.time
-        context["game_loop"] = self.state.game_loop
-        context["visible"] = self.is_visible(death_pos)
         
-        # Log to failure logger
+        # Log the death to the failure logger
         self.failure_logger.log_probe_death(death_pos, context)
         
-        # Reset path and path history
+        # Reset path tracking for the new probe
         self.path = []
         self.path_history = []
         
-        # Force save logs immediately 
+        # Reset waypoint navigation so the new probe starts from the beginning
+        self.current_waypoint_index = 0
+        self.waypoint_reached = False
+        print(f"[NAVIGATION] Waypoint progress reset to beginning (waypoint {self.current_waypoint_index})")
+        
+        # Update risk map with death location
+        self.update_risk_map()
+        
+        # Save logs immediately
         try:
-            print("[LOG] Forcing immediate log save after probe death")
             self.failure_logger.save_to_file()
+            print(f"[LOG] Death #{context['death_count']} logged and saved at position {death_pos}")
         except Exception as e:
-            print(f"[ERROR] Failed to save logs after probe death: {e}")
-            traceback.print_exc()
-        self.path_history = []  # Clear path history too
+            print(f"[ERROR] Failed to save death log: {e}")
         
         # Try to get the probe again (it might have respawned)
         probe = self.units.by_tag(self.probe_tag) if self.probe_tag else None
@@ -747,19 +729,18 @@ class PathfindingProbe(BotAI):
             self._draw_path_box(point, color)
 
     async def on_end(self, game_result: Result):
-        """Handle end of game - ensure logs are saved"""
+        """Handle end of game - save logs and report path efficiency"""
         print(f"[END] Game ended with result: {game_result}")
         
-        # Make sure logs are saved at the end of the game
+        # Save logs at end of game
         try:
-            print("[LOG] Saving logs at game end")
             self.failure_logger.save_to_file()
-            print("[LOG] End-of-game log save complete")
+            print(f"[LOG] Final game logs saved")
         except Exception as e:
             print(f"[ERROR] Failed to save logs at game end: {e}")
-            traceback.print_exc()
-        if self.workers:
-            self.p1 = self.workers.first.position
+            
+        # Print path efficiency report
+        if hasattr(self, 'path') and len(self.path) > 1:
             self.print_path_efficiency()
 
     def print_path_efficiency(self):
