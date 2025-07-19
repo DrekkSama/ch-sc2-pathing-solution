@@ -284,18 +284,14 @@ class PathfindingProbe(BotAI):
         ) * 0.5 * 0.8  # 80% of half the smaller dimension
         
         # Set the waypoints to the specific coordinates provided
-        self.waypoints = [
-            Point2((35.27, 140.06)),  # Area 1
-            Point2((47.20, 108.33)),  # Area 2
-            Point2((107.07, 112.04)), # Area 3
-            Point2((137.66, 136.96)), # Area 4
-            Point2((134.84, 69.69)),  # Area 5
-            Point2((84.90, 109.94))   # Area 6
+        waypoints_unsorted = [
+            Point2((84.90, 109.94)),  # Area 1
+            Point2((60.45, 132.74)),  # Area 2
+            Point2((47.20, 108.33)),  # Area 3
+            Point2((107.07, 112.04)), # Area 4
+            Point2((137.66, 136.96)), # Area 5
+            Point2((134.84, 69.69))   # Area 6
         ]
-        
-        # Add a small offset to the first waypoint to ensure it's reachable
-        # This helps prevent the probe from getting stuck on the initial position
-        self.waypoints[0] = self.waypoints[0].offset(Point2((1.0, 1.0)))
         
         # Wait for workers to be available
         print("[INIT] Waiting for workers...")
@@ -311,6 +307,13 @@ class PathfindingProbe(BotAI):
         else:
             print("[ERROR] No workers found!")
             return
+        
+        # Sort waypoints by distance to probe's starting position for optimal navigation
+        self.waypoints = sorted(waypoints_unsorted, key=lambda wp: self.p0.distance_to(wp))
+        print(f"[INIT] Waypoints sorted by distance from starting position {self.p0}:")
+        for i, wp in enumerate(self.waypoints):
+            distance = self.p0.distance_to(wp)
+            print(f"  {i+1}. {wp} (distance: {distance:.2f})")
         
         # Set initial target to first waypoint
         if self.waypoints:
