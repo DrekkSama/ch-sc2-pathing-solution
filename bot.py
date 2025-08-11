@@ -17,13 +17,145 @@ import math
 
 from sc2.position import Point2, Point3
 from map_analyzer import MapData
+import config
 
+class RiskManager:
+    """Manages dual-layer risk system with live and learned risk maps"""
+    
+    def __init__(self, map_width: int, map_height: int, data_dir: str = None):
+        self.map_width = map_width
+        self.map_height = map_height
+        self.data_dir = data_dir or config.DATA_DIR
+        
+        # Initialize risk maps
+        self.live_risk_map = np.zeros((map_width, map_height), dtype=np.float32)
+        self.learned_risk_map = np.zeros((map_width, map_height), dtype=np.float32)
+        self.exploration_map = np.zeros((map_width, map_height), dtype=np.int32)
+        
+        # Ensure data directory exists
+        self.ensure_data_dir()
+        
+        # Load persistent data
+        self.load_persistent_data()
+        
+        print(f"[RISK] RiskManager initialized with {map_width}x{map_height} maps")
+    
+    def ensure_data_dir(self):
+        """Create data directory if it doesn't exist"""
+        try:
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+                print(f"[RISK] Created data directory: {self.data_dir}")
+        except Exception as e:
+            print(f"[ERROR] Failed to create data directory: {e}")
+    
+    def load_persistent_data(self):
+        """Load learned risk map and exploration data from previous sessions"""
+        try:
+            learned_path = os.path.join(self.data_dir, config.LEARNED_RISKS_FILE)
+            if os.path.exists(learned_path):
+                self.learned_risk_map = np.load(learned_path)
+                print(f"[RISK] Loaded learned risk map from {learned_path}")
+            
+            exploration_path = os.path.join(self.data_dir, config.EXPLORATION_MAP_FILE)
+            if os.path.exists(exploration_path):
+                self.exploration_map = np.load(exploration_path)
+                print(f"[RISK] Loaded exploration map from {exploration_path}")
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to load persistent data: {e}")
+    
+    def save_persistent_data(self):
+        """Save learned risk map and exploration data for future sessions"""
+        try:
+            learned_path = os.path.join(self.data_dir, config.LEARNED_RISKS_FILE)
+            np.save(learned_path, self.learned_risk_map)
+            
+            exploration_path = os.path.join(self.data_dir, config.EXPLORATION_MAP_FILE)
+            np.save(exploration_path, self.exploration_map)
+            
+            print(f"[RISK] Saved persistent data to {self.data_dir}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save persistent data: {e}")
+    
+    def get_combined_risk(self, x: int, y: int) -> float:
+        """Get combined risk value for a position"""
+        if not (0 <= x < self.map_width and 0 <= y < self.map_height):
+            return 100.0  # High risk for out-of-bounds
+        
+        live_risk = self.live_risk_map[x, y] * config.LIVE_RISK_WEIGHT
+        learned_risk = self.learned_risk_map[x, y] * config.LEARNED_RISK_WEIGHT
+        
+        # Exploration bonus for under-explored areas
+        exploration_bonus = 0
+        if self.exploration_map[x, y] < config.MIN_VISITS_FOR_EXPLORATION:
+            exploration_bonus = config.EXPLORATION_BONUS
+        
+        return max(0, live_risk + learned_risk + exploration_bonus)
+    
+    def add_death_risk(self, position: Point2, is_current_session: bool = True):
+        """Add risk at death location"""
+        x, y = int(position.x), int(position.y)
+        if not (0 <= x < self.map_width and 0 <= y < self.map_height):
+            return
+        
+        if is_current_session:
+            # High immediate risk for current session deaths
+            self.live_risk_map[x, y] = min(100, self.live_risk_map[x, y] + config.DEATH_PENALTY_LIVE)
+            # Also add to learned map for persistence
+            self.learned_risk_map[x, y] = min(100, self.learned_risk_map[x, y] + config.DEATH_PENALTY_LEARNED)
+        else:
+            # Historical death from loaded data
+            self.learned_risk_map[x, y] = min(100, self.learned_risk_map[x, y] + config.DEATH_PENALTY_LEARNED)
+        
+        # Spread risk in a small radius around death location
+        radius = 3
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.map_width and 0 <= ny < self.map_height:
+                    distance = math.sqrt(dx*dx + dy*dy)
+                    if distance <= radius:
+                        # Falloff based on distance
+                        falloff = max(0, 1 - distance / radius)
+                        penalty = (config.DEATH_PENALTY_LIVE if is_current_session else config.DEATH_PENALTY_LEARNED) * falloff * 0.3
+                        
+                        if is_current_session:
+                            self.live_risk_map[nx, ny] = min(100, self.live_risk_map[nx, ny] + penalty)
+                        self.learned_risk_map[nx, ny] = min(100, self.learned_risk_map[nx, ny] + penalty * 0.5)
+    
+    
+    def add_success_reward(self, position: Point2):
+        """Reduce risk when probe successfully passes through an area"""
+        x, y = int(position.x), int(position.y)
+        if not (0 <= x < self.map_width and 0 <= y < self.map_height):
+            return
+        
+        # Reduce risk and increment exploration count
+        self.live_risk_map[x, y] = max(0, self.live_risk_map[x, y] + config.SUCCESS_REWARD)
+        self.exploration_map[x, y] += 1
+    
+    def apply_temporal_decay(self):
+        """Apply time-based decay to live risk map"""
+        self.live_risk_map *= (1 - config.TEMPORAL_DECAY_RATE)
+        # Keep values above a small threshold to prevent floating point issues
+        self.live_risk_map[self.live_risk_map < 0.01] = 0
+    
+    def get_risk_map_for_pathfinding(self) -> np.ndarray:
+        """Get combined risk map for use in pathfinding"""
+        combined_map = np.zeros((self.map_width, self.map_height), dtype=np.float32)
+        
+        for x in range(self.map_width):
+            for y in range(self.map_height):
+                combined_map[x, y] = self.get_combined_risk(x, y)
+        
+        return combined_map
 
 class FailureLogger:
     """Handles structured logging of failures for adaptive learning"""
     
-    def __init__(self, log_dir="logs"):
-        self.log_dir = log_dir
+    def __init__(self, log_dir=None):
+        self.log_dir = log_dir or config.DATA_DIR
         self.failure_log = []
         self.session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_file = f"failure_log_{self.session_timestamp}.json"
@@ -234,10 +366,11 @@ class PathfindingProbe(BotAI):
         self.p0 = None
         self.target = None
         
-        # Risk management
+        # Risk management - dual layer system
         self.death_log = []  # Keep for backward compatibility
         self.enemy_units = []
         self.risk_map = None
+        self.risk_manager = None  # Will be initialized in on_start when map size is known
         
         # Failure logging system for adaptive learning
         self.failure_logger = FailureLogger()
@@ -269,7 +402,11 @@ class PathfindingProbe(BotAI):
         self.map_data = MapData(self, loglevel="INFO", arcade=True)
         grid: np.ndarray = self.map_data.get_pyastar_grid()
         
-        # Initialize risk map with zeros (same shape as grid)
+        # Initialize dual-layer risk management system
+        map_width, map_height = grid.shape
+        self.risk_manager = RiskManager(map_width, map_height)
+        
+        # Initialize risk map with zeros (same shape as grid) - keep for backward compatibility
         self.risk_map = np.zeros(grid.shape, dtype=float)
         
         # Initialize influence grid (1 = walkable, 10 = unwalkable)
@@ -384,6 +521,17 @@ class PathfindingProbe(BotAI):
             print(f"[DEBUG] Current waypoint: {self.waypoints[self.current_waypoint_index]}")
             print(f"[DEBUG] Game state - Time: {self.time:.1f}, Supply: {self.supply_used}/{self.supply_cap}")
             
+            # Show dual-layer risk system status
+            if self.risk_manager:
+                x, y = int(probe.position.x), int(probe.position.y)
+                if 0 <= x < self.risk_manager.map_width and 0 <= y < self.risk_manager.map_height:
+                    live_risk = self.risk_manager.live_risk_map[x, y]
+                    learned_risk = self.risk_manager.learned_risk_map[x, y]
+                    combined_risk = self.risk_manager.get_combined_risk(x, y)
+                    exploration_count = self.risk_manager.exploration_map[x, y]
+                    print(f"[RISK] Current position - Live: {live_risk:.2f}, Learned: {learned_risk:.2f}, Combined: {combined_risk:.2f}, Visits: {exploration_count}")
+                    print(f"[RISK] Total deaths logged: {self.failure_logger.stats['total_deaths']}")
+            
         # Track path history for visualization and failure analysis
         if len(self.path) == 0 or probe.position.distance_to(self.path[-1]) > 1.0:
             self.path.append(probe.position)
@@ -394,6 +542,10 @@ class PathfindingProbe(BotAI):
             # Limit main path history length for visualization
             if len(self.path) > 100:
                 self.path.pop(0)
+            
+            # Add success reward to risk manager for successful movement
+            if self.risk_manager:
+                self.risk_manager.add_success_reward(probe.position)
 
         # Get current waypoint
         current_waypoint = self.waypoints[self.current_waypoint_index]
@@ -452,7 +604,14 @@ class PathfindingProbe(BotAI):
                         "start_position": {"x": start_pos.x, "y": start_pos.y},
                         "goal_position": {"x": target_pos.x, "y": target_pos.y},
                         "path_history": self.path_history.copy(),
-                        "enemy_units": [unit for unit in self.enemy_units if unit.distance_to(start_pos) < 15],
+                        "enemy_units": [
+                            {
+                                "type": str(unit.type_id),
+                                "position": {"x": unit.position.x, "y": unit.position.y},
+                                "distance": unit.distance_to(start_pos)
+                            }
+                            for unit in self.enemy_units if unit.distance_to(start_pos) < 15
+                        ],
                         "game_time": self.time,
                         "loop": self.state.game_loop,
                         "risk_threshold": risk_threshold,
@@ -523,7 +682,22 @@ class PathfindingProbe(BotAI):
         """Update the risk map based on enemy positions, death log, and failure statistics for adaptive learning"""
         if self.risk_map is None or self.risk_map.size == 0:
             return
+        
+        # Update the new dual-layer risk management system
+        if self.risk_manager:
+            # Apply temporal decay to live risk map
+            self.risk_manager.apply_temporal_decay()
             
+            # Add risk around enemy units to the new system
+            for unit in self.enemy_units:
+                # Add enemy risk to live risk map
+                self.risk_manager.add_death_risk(unit.position, is_current_session=True)
+            
+            # Update the legacy risk map with combined risk for backward compatibility
+            self.risk_map = self.risk_manager.get_risk_map_for_pathfinding()
+            return
+            
+        # Legacy risk map update (fallback if RiskManager not available)
         # Decay existing risk - simulates risk fading over time if no new deaths/failures occur there
         self.risk_map = self.risk_map * 0.95
         
@@ -665,6 +839,11 @@ class PathfindingProbe(BotAI):
         # Log the death to the failure logger
         self.failure_logger.log_probe_death(death_pos, context)
         
+        # Add death risk to the new dual-layer risk management system
+        if self.risk_manager:
+            self.risk_manager.add_death_risk(death_pos, is_current_session=True)
+            print(f"[RISK] Added death risk to dual-layer system at {death_pos}")
+        
         # Reset path tracking for the new probe
         self.path = []
         self.path_history = []
@@ -674,7 +853,7 @@ class PathfindingProbe(BotAI):
         self.waypoint_reached = False
         print(f"[NAVIGATION] Waypoint progress reset to beginning (waypoint {self.current_waypoint_index})")
         
-        # Update risk map with death location
+        # Update risk map with death location (keep for backward compatibility)
         self.update_risk_map()
         
         # Save logs immediately
@@ -734,6 +913,11 @@ class PathfindingProbe(BotAI):
     async def on_end(self, game_result: Result):
         """Handle end of game - save logs and report path efficiency"""
         print(f"[END] Game ended with result: {game_result}")
+        
+        # Save persistent risk data for future sessions
+        if self.risk_manager:
+            self.risk_manager.save_persistent_data()
+            print(f"[RISK] Saved persistent learning data for future sessions")
         
         # Save logs at end of game
         try:
