@@ -124,7 +124,40 @@ class RiskManager:
                             self.live_risk_map[nx, ny] = min(100, self.live_risk_map[nx, ny] + penalty)
                         self.learned_risk_map[nx, ny] = min(100, self.learned_risk_map[nx, ny] + penalty * 0.5)
     
-    
+    def _apply_radial(self, x: int, y: int, base_penalty: float, radius: int, live: bool = True, learned_scale: float = 0.0) -> None:
+        """Apply a radial penalty with linear falloff. Optionally add a fraction to learned map."""
+        if base_penalty <= 0 or radius <= 0:
+            return
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.map_width and 0 <= ny < self.map_height:
+                    d = math.hypot(dx, dy)
+                    if d <= radius:
+                        falloff = max(0.0, 1.0 - (d / radius))
+                        add = max(0.0, base_penalty * falloff)
+                        # Clamp per-call contribution to avoid spikes when many sources overlap
+                        add = min(add, float(config.LIVE_RISK_MAX_ADD_PER_CALL))
+                        if live:
+                            self.live_risk_map[nx, ny] = min(100.0, self.live_risk_map[nx, ny] + add)
+                        if learned_scale > 0.0:
+                            self.learned_risk_map[nx, ny] = min(100.0, self.learned_risk_map[nx, ny] + add * learned_scale)
+
+    def add_damage_risk(self, position: Point2, damage_amount: float) -> None:
+        """Increase live risk around where damage was taken. Does not persist to learned map."""
+        x, y = int(position.x), int(position.y)
+        if not (0 <= x < self.map_width and 0 <= y < self.map_height):
+            return
+        magnitude = max(0.0, float(damage_amount)) * float(config.DAMAGE_RISK_PER_HP)
+        self._apply_radial(x, y, magnitude, int(config.DAMAGE_SPREAD_RADIUS), live=True, learned_scale=0.0)
+
+    def add_enemy_presence_risk(self, position: Point2) -> None:
+        """Add small live risk around visible enemy positions each frame."""
+        x, y = int(position.x), int(position.y)
+        if not (0 <= x < self.map_width and 0 <= y < self.map_height):
+            return
+        self._apply_radial(x, y, float(config.ENEMY_PRESENCE_PENALTY), int(config.ENEMY_PRESENCE_RADIUS), live=True, learned_scale=0.0)
+
     def add_success_reward(self, position: Point2):
         """Reduce risk when probe successfully passes through an area"""
         x, y = int(position.x), int(position.y)
@@ -365,6 +398,7 @@ class PathfindingProbe(BotAI):
         self.probe_tag = None
         self.p0 = None
         self.target = None
+        self._last_total_hp = None
         
         # Risk management - dual layer system
         self.death_log = []  # Keep for backward compatibility
@@ -441,6 +475,11 @@ class PathfindingProbe(BotAI):
             self.probe_tag = worker.tag
             self.p0 = worker.position
             print(f"[INIT] Found worker with tag {self.probe_tag} at {self.p0}")
+            # Initialize baseline HP+shield for damage detection
+            try:
+                self._last_total_hp = float(worker.health + worker.shield)
+            except Exception:
+                self._last_total_hp = None
         else:
             print("[ERROR] No workers found!")
             return
@@ -500,19 +539,44 @@ class PathfindingProbe(BotAI):
             if probe:
                 self.probe_tag = probe.tag
                 print(f"[INFO] Probe respawned at {probe.position}")
+                # Reset baseline HP+shield on new probe
+                try:
+                    self._last_total_hp = float(probe.health + probe.shield)
+                except Exception:
+                    self._last_total_hp = None
         elif not probe and self.workers:
             # No probe assigned yet, get the first worker
             probe = self.workers.first
             if probe:
                 self.probe_tag = probe.tag
                 print(f"[INFO] Assigned new probe: {probe.tag} at {probe.position}")
+                # Initialize baseline HP+shield
+                try:
+                    self._last_total_hp = float(probe.health + probe.shield)
+                except Exception:
+                    self._last_total_hp = None
         
         if not probe:
             print("[WARNING] No probe found to control")
             return
             
-        # Update risk map with current enemy positions
+        # Update seen enemy set
         self.enemy_units = self.enemy_units | self.all_enemy_units
+
+        # Damage-aware risk update (before recomputing combined risk)
+        if self.risk_manager and probe:
+            try:
+                current_total = float(probe.health + probe.shield)
+                if self._last_total_hp is None:
+                    self._last_total_hp = current_total
+                else:
+                    delta = current_total - self._last_total_hp
+                    if delta < -0.05:  # Took damage
+                        self.risk_manager.add_damage_risk(probe.position, -delta)
+                    self._last_total_hp = current_total
+            except Exception as e:
+                print(f"[RISK] Damage tracking error: {str(e)[:80]}")
+
         self.update_risk_map()
         
         # Print debug info periodically
@@ -688,10 +752,10 @@ class PathfindingProbe(BotAI):
             # Apply temporal decay to live risk map
             self.risk_manager.apply_temporal_decay()
             
-            # Add risk around enemy units to the new system
-            for unit in self.enemy_units:
-                # Add enemy risk to live risk map
-                self.risk_manager.add_death_risk(unit.position, is_current_session=True)
+            # Add small live risk around enemy units (downsampled to reduce noise)
+            if self.state.game_loop % 1 == 0:
+                for unit in self.enemy_units:
+                    self.risk_manager.add_enemy_presence_risk(unit.position)
             
             # Update the legacy risk map with combined risk for backward compatibility
             self.risk_map = self.risk_manager.get_risk_map_for_pathfinding()
