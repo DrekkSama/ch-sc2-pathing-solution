@@ -22,9 +22,10 @@ import config
 class RiskManager:
     """Manages dual-layer risk system with live and learned risk maps"""
     
-    def __init__(self, map_width: int, map_height: int, data_dir: str = None):
+    def __init__(self, map_width: int, map_height: int, map_name: str = "default", data_dir: str = None):
         self.map_width = map_width
         self.map_height = map_height
+        self.map_name = map_name
         self.data_dir = data_dir or config.DATA_DIR
         
         # Initialize risk maps
@@ -38,7 +39,7 @@ class RiskManager:
         # Load persistent data
         self.load_persistent_data()
         
-        print(f"[RISK] RiskManager initialized with {map_width}x{map_height} maps")
+        print(f"[RISK] RiskManager initialized with {map_width}x{map_height} maps for {map_name}")
     
     def ensure_data_dir(self):
         """Create data directory if it doesn't exist"""
@@ -52,15 +53,33 @@ class RiskManager:
     def load_persistent_data(self):
         """Load learned risk map and exploration data from previous sessions"""
         try:
-            learned_path = os.path.join(self.data_dir, config.LEARNED_RISKS_FILE)
-            if os.path.exists(learned_path):
-                self.learned_risk_map = np.load(learned_path)
-                print(f"[RISK] Loaded learned risk map from {learned_path}")
+            # Use map-specific file names to avoid coordinate system mismatches
+            learned_filename = f"learned_risks_{self.map_name}_{self.map_width}x{self.map_height}.npy"
+            exploration_filename = f"exploration_map_{self.map_name}_{self.map_width}x{self.map_height}.npy"
             
-            exploration_path = os.path.join(self.data_dir, config.EXPLORATION_MAP_FILE)
+            learned_path = os.path.join(self.data_dir, learned_filename)
+            if os.path.exists(learned_path):
+                loaded_data = np.load(learned_path)
+                if loaded_data.shape == (self.map_width, self.map_height):
+                    self.learned_risk_map = loaded_data
+                    print(f"[RISK] Loaded learned risk map from {learned_path} - shape {loaded_data.shape}")
+                    print(f"[RISK] Max learned risk: {loaded_data.max():.2f}, Non-zero entries: {np.count_nonzero(loaded_data)}")
+                else:
+                    print(f"[RISK] Map dimension mismatch: file {loaded_data.shape} vs current {(self.map_width, self.map_height)}")
+                    print(f"[RISK] Starting fresh learned risk map")
+            else:
+                print(f"[RISK] No learned risk file found for {self.map_name}, starting fresh")
+            
+            exploration_path = os.path.join(self.data_dir, exploration_filename)
             if os.path.exists(exploration_path):
-                self.exploration_map = np.load(exploration_path)
-                print(f"[RISK] Loaded exploration map from {exploration_path}")
+                loaded_data = np.load(exploration_path)
+                if loaded_data.shape == (self.map_width, self.map_height):
+                    self.exploration_map = loaded_data
+                    print(f"[RISK] Loaded exploration map from {exploration_path}")
+                else:
+                    print(f"[RISK] Exploration map dimension mismatch, starting fresh")
+            else:
+                print(f"[RISK] No exploration file found for {self.map_name}, starting fresh")
                 
         except Exception as e:
             print(f"[ERROR] Failed to load persistent data: {e}")
@@ -68,13 +87,18 @@ class RiskManager:
     def save_persistent_data(self):
         """Save learned risk map and exploration data for future sessions"""
         try:
-            learned_path = os.path.join(self.data_dir, config.LEARNED_RISKS_FILE)
+            # Use map-specific file names to avoid coordinate system mismatches
+            learned_filename = f"learned_risks_{self.map_name}_{self.map_width}x{self.map_height}.npy"
+            exploration_filename = f"exploration_map_{self.map_name}_{self.map_width}x{self.map_height}.npy"
+            
+            learned_path = os.path.join(self.data_dir, learned_filename)
             np.save(learned_path, self.learned_risk_map)
             
-            exploration_path = os.path.join(self.data_dir, config.EXPLORATION_MAP_FILE)
+            exploration_path = os.path.join(self.data_dir, exploration_filename)
             np.save(exploration_path, self.exploration_map)
             
-            print(f"[RISK] Saved persistent data to {self.data_dir}")
+            print(f"[RISK] Saved persistent data to {self.data_dir} for {self.map_name}")
+            print(f"[RISK] Learned risk stats: max={self.learned_risk_map.max():.2f}, non-zero={np.count_nonzero(self.learned_risk_map)}")
         except Exception as e:
             print(f"[ERROR] Failed to save persistent data: {e}")
     
@@ -438,7 +462,8 @@ class PathfindingProbe(BotAI):
         
         # Initialize dual-layer risk management system
         map_width, map_height = grid.shape
-        self.risk_manager = RiskManager(map_width, map_height)
+        map_name = self.game_info.map_name.replace(" ", "_")  # Clean map name for filenames
+        self.risk_manager = RiskManager(map_width, map_height, map_name)
         
         # Initialize risk map with zeros (same shape as grid) - keep for backward compatibility
         self.risk_map = np.zeros(grid.shape, dtype=float)
@@ -617,35 +642,97 @@ class PathfindingProbe(BotAI):
         # Simple movement towards waypoint
         waypoint_reached = probe.position.distance_to(current_waypoint) < 0.1  # 0.1 is close enough to consider waypoint reached
         if not waypoint_reached:  # If not at waypoint
+            # Check if waypoint is currently dangerous
+            waypoint_risk = 0.0
+            if self.risk_manager:
+                # Check live enemy risk at waypoint
+                for enemy in self.enemy_units:
+                    distance = enemy.position.distance_to(current_waypoint)
+                    if distance <= config.ENEMY_PRESENCE_RADIUS:
+                        waypoint_risk += config.ENEMY_PRESENCE_PENALTY * (1.0 - distance / config.ENEMY_PRESENCE_RADIUS)
+                
+                # Check learned risk at waypoint
+                wx, wy = int(current_waypoint.x), int(current_waypoint.y)
+                if (0 <= wx < self.risk_manager.map_width and 0 <= wy < self.risk_manager.map_height):
+                    learned_risk = self.risk_manager.learned_risk_map[wx, wy]
+                    waypoint_risk += learned_risk * config.LEARNED_RISK_WEIGHT
+            
+            # If waypoint is too dangerous, find a safer intermediate waypoint
+            if waypoint_risk > config.PATHFINDING_RISK_THRESHOLD * 3:
+                print(f"[RISK] Waypoint too dangerous (risk={waypoint_risk:.2f}), finding safer route")
+                # Find a safer position between probe and waypoint
+                direction = (current_waypoint - probe.position).normalized
+                for step_distance in [3.0, 5.0, 8.0]:  # Try different distances
+                    safe_pos = probe.position + (direction * step_distance)
+                    safe_risk = 0.0
+                    
+                    # Check if this intermediate position is safer
+                    for enemy in self.enemy_units:
+                        enemy_dist = enemy.position.distance_to(safe_pos)
+                        if enemy_dist <= config.ENEMY_PRESENCE_RADIUS:
+                            safe_risk += config.ENEMY_PRESENCE_PENALTY * (1.0 - enemy_dist / config.ENEMY_PRESENCE_RADIUS)
+                    
+                    if safe_risk < waypoint_risk * 0.5:  # Much safer
+                        current_waypoint = safe_pos
+                        print(f"[RISK] Using safer intermediate waypoint at {safe_pos} (risk={safe_risk:.2f})")
+                        break
+            
             # Always try pathfinding first
             try:
-                # Create a proper combined grid of influence and risk
-                # Start with a clean grid (1 = walkable, higher values = more costly to traverse)
-                combined_grid = self.map_data.get_pyastar_grid().astype(np.float32)
+                # Start with map_analyzer's base grid
+                cost_grid = self.map_data.get_pyastar_grid().astype(np.float32)
                 
-                # Scale risk values appropriately (risk should increase cost but not make areas impassable)
-                # Only apply risk where it exceeds threshold
-                risk_threshold = 0.5
-                risk_mask = (self.risk_map > risk_threshold)
+                # Add enemy presence costs (optimized)
+                for enemy in self.enemy_units:
+                    enemy_pos = enemy.position
+                    x_center, y_center = int(enemy_pos.x), int(enemy_pos.y)
+                    
+                    # Quick bounds check
+                    if not (config.ENEMY_PRESENCE_RADIUS <= x_center < cost_grid.shape[0] - config.ENEMY_PRESENCE_RADIUS and
+                            config.ENEMY_PRESENCE_RADIUS <= y_center < cost_grid.shape[1] - config.ENEMY_PRESENCE_RADIUS):
+                        continue
+                    
+                    # Optimized: only check in smaller radius and use pre-computed distances
+                    radius_sq = config.ENEMY_PRESENCE_RADIUS * config.ENEMY_PRESENCE_RADIUS
+                    for dx in range(-config.ENEMY_PRESENCE_RADIUS, config.ENEMY_PRESENCE_RADIUS + 1):
+                        for dy in range(-config.ENEMY_PRESENCE_RADIUS, config.ENEMY_PRESENCE_RADIUS + 1):
+                            dist_sq = dx*dx + dy*dy
+                            if dist_sq <= radius_sq:
+                                x_grid, y_grid = x_center + dx, y_center + dy
+                                if cost_grid[x_grid, y_grid] != np.inf:
+                                    falloff = max(0, 1 - (math.sqrt(dist_sq) / config.ENEMY_PRESENCE_RADIUS))
+                                    cost_grid[x_grid, y_grid] += config.ENEMY_PRESENCE_PENALTY * falloff
                 
-                # Add scaled risk to walkable areas (multiplier of 3 rather than 10 to avoid making areas impassable)
-                # Minimum risk cost is 1 (baseline) + scaled risk value
-                risk_addition = np.minimum(4.0, 1.0 + (3.0 * self.risk_map[risk_mask]))
+                # Add learned risk costs (optimized - only near current path)
+                if self.risk_manager and hasattr(self, 'current_path') and len(self.current_path) > 1:
+                    # Only apply learned risk near the current path for performance
+                    path_radius = 15  # Check learned risk within 15 units of path
+                    for path_point in self.current_path[::3]:  # Sample every 3rd point
+                        px, py = int(path_point.x), int(path_point.y)
+                        
+                        # Check learned risk in small area around path
+                        for dx in range(-path_radius, path_radius + 1, 2):  # Step by 2 for performance
+                            for dy in range(-path_radius, path_radius + 1, 2):
+                                x_grid, y_grid = px + dx, py + dy
+                                if (0 <= x_grid < min(self.risk_manager.map_width, cost_grid.shape[0]) and
+                                    0 <= y_grid < min(self.risk_manager.map_height, cost_grid.shape[1])):
+                                    learned_risk = self.risk_manager.learned_risk_map[x_grid, y_grid]
+                                    if learned_risk > config.PATHFINDING_RISK_THRESHOLD:
+                                        if x_grid < cost_grid.shape[0] and y_grid < cost_grid.shape[1] and cost_grid[x_grid, y_grid] != np.inf:
+                                            risk_cost = min(config.PATHFINDING_RISK_CAP, 
+                                                          learned_risk * config.LEARNED_RISK_WEIGHT)
+                                            cost_grid[x_grid, y_grid] += risk_cost
                 
-                # Add risk to the existing grid values for risky areas
-                combined_grid[risk_mask] += risk_addition
-                
-                # Convert positions to Point2 if they aren't already
+                # Convert positions to Point2 for map_analyzer
                 start_pos = Point2((probe.position.x, probe.position.y))
                 target_pos = Point2((current_waypoint.x, current_waypoint.y))
                 
-                # Find path using A*
+                # Use map_analyzer's pathfinding WITH the modified grid
                 path = self.map_data.pathfind(
                     start=start_pos,
                     goal=target_pos,
-                    grid=combined_grid,
-                    smoothing=True,
-                    sensitivity=1
+                    grid=cost_grid,  # Apply the modified grid!
+                    smoothing=True
                 )
                 
                 if path and len(path) > 1:
@@ -678,7 +765,7 @@ class PathfindingProbe(BotAI):
                         ],
                         "game_time": self.time,
                         "loop": self.state.game_loop,
-                        "risk_threshold": risk_threshold,
+                        "risk_threshold": config.PATHFINDING_RISK_THRESHOLD,
                         "max_risk_value": float(self.risk_map.max()) if self.risk_map.size > 0 else 0.0
                     }
                     
@@ -700,47 +787,13 @@ class PathfindingProbe(BotAI):
             self.current_waypoint_index = (self.current_waypoint_index + 1) % len(self.waypoints)
             print(f"[MOVE] Reached waypoint, moving to next: {self.waypoints[self.current_waypoint_index]}")
         
-        # Debug drawing
-        if self.show_debug and iteration % 10 == 0:  # Don't draw every frame to save performance
+        # Lightweight debug output (text only - no expensive drawing)
+        if self.show_debug and iteration % 50 == 0:  # Reduced frequency
             try:
-                # Draw waypoints
-                for i, wp in enumerate(self.waypoints):
-                    if hasattr(self, 'get_terrain_height'):
-                        height = self.get_terrain_height(Point2((wp.x, wp.y)))
-                        pos_3d = Point3((wp.x, wp.y, height))
-                        color = GREEN if i == self.current_waypoint_index else RED
-                        self._draw_path_box(pos_3d, color=color)
-                
-                # Draw current position
-                if hasattr(self, 'get_terrain_height'):
-                    height = self.get_terrain_height(probe.position)
-                    pos_3d = Point3((probe.position.x, probe.position.y, height))
-                    self._draw_path_box(pos_3d, color=GREEN)
-                
-                # Draw line to current target
-                target = self.waypoints[self.current_waypoint_index]
-                if hasattr(self, 'get_terrain_height'):
-                    start_height = self.get_terrain_height(probe.position)
-                    end_height = self.get_terrain_height(target)
-                    self.client.debug_line_out(
-                        Point3((probe.position.x, probe.position.y, start_height)),
-                        Point3((target.x, target.y, end_height)),
-                        color=GREEN
-                    )
-                
-                # Draw current path if it exists
-                if hasattr(self, 'current_path') and len(self.current_path) > 1:
-                    path_points = []
-                    for point in self.current_path:
-                        if hasattr(self, 'get_terrain_height'):
-                            height = self.get_terrain_height(Point2((point.x, point.y)))
-                            path_points.append(Point3((point.x, point.y, height + 0.5)))
-                    
-                    if len(path_points) > 1 and hasattr(self.client, 'debug_polyline_out'):
-                        self.client.debug_polyline_out(path_points, color=BLUE)
-                
-            except Exception as e:
-                print(f"[DEBUG] Error in debug drawing: {str(e)[:100]}")
+                current_wp = self.waypoints[self.current_waypoint_index]
+                print(f"[DEBUG] WP {self.current_waypoint_index}: {current_wp}, {len(self.enemy_units)} enemies")
+            except Exception:
+                pass
 
     def update_risk_map(self):
         """Update the risk map based on enemy positions, death log, and failure statistics for adaptive learning"""
@@ -758,7 +811,16 @@ class PathfindingProbe(BotAI):
                     self.risk_manager.add_enemy_presence_risk(unit.position)
             
             # Update the legacy risk map with combined risk for backward compatibility
-            self.risk_map = self.risk_manager.get_risk_map_for_pathfinding()
+            # Convert RiskManager's coordinate system to match map_analyzer's grid dimensions
+            if hasattr(self, 'risk_map') and self.risk_map is not None:
+                # Ensure risk_map matches the current map_analyzer grid dimensions
+                if self.risk_map.shape != (self.risk_manager.map_width, self.risk_manager.map_height):
+                    self.risk_map = np.zeros((self.risk_manager.map_width, self.risk_manager.map_height), dtype=np.float32)
+                
+                # Update risk_map with combined risk values
+                for x in range(self.risk_manager.map_width):
+                    for y in range(self.risk_manager.map_height):
+                        self.risk_map[x, y] = self.risk_manager.get_combined_risk(x, y)
             return
             
         # Legacy risk map update (fallback if RiskManager not available)
